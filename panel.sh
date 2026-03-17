@@ -1,177 +1,284 @@
 #!/usr/bin/env bash
-# =============================================================================
-# KS Warrior - Powerful Pterodactyl Panel in SINGLE Docker Container (2026)
-# Empty Ubuntu → full official bare-metal install inside → zero host pollution
-# All-in-one: Panel + Nginx + MariaDB + Redis + Queue + Cron in one container
-# Port 80 exposed | Fully automated after prompts
-# =============================================================================
-
 set -euo pipefail
 
-INSTALL_DIR="$HOME/.ks/pterodactyl/panel"
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR" || exit 1
-
-# Colors
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-echo -e "\( {GREEN}KS Warrior presents: Pterodactyl Panel in ONE Docker container \){NC}"
-echo "Everything runs inside → your host stays clean!"
+echo -e "\( {GREEN}Pterodactyl Panel Docker Setup Wizard (2026 edition) \){NC}"
+echo "This script will ask questions, generate docker-compose.yml and finish initial setup."
+echo ""
 
 # ────────────────────────────────────────────────
 # Gather user input
 # ────────────────────────────────────────────────
-echo -e "\n\( {YELLOW}Panel URL (http://your-domain.com or http://your-server-ip): \){NC}"
-read -r APP_URL
-APP_URL="${APP_URL:-http://localhost}"
 
-DB_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 20)
-ROOT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+read -rp "Domain / Panel URL (example: https://panel.mydomain.com): " APP_URL
+APP_URL="${APP_URL:-https://panel.example.com}"
 
-echo -e "\n\( {YELLOW}Generated passwords (SAVE THEM!): \){NC}"
-echo "MariaDB root password   : ${RED}\( ROOT_DB_PASS \){NC}"
-echo "Panel DB password       : ${RED}\( DB_PASS \){NC}"
+# Basic URL validation
+if [[ ! "$APP_URL" =\~ ^https?:// ]]; then
+    echo -e "${RED}URL must start with http:// or https:// ${NC}"
+    exit 1
+fi
 
-echo -e "\n\( {YELLOW}Admin details: \){NC}"
-echo "Admin email? (default: admin@example.com)"
-read -r ADMIN_EMAIL
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
+read -rp "Admin email (will be used for MAIL_FROM too) [admin@yourdomain.com]: " ADMIN_EMAIL
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@yourdomain.com}"
 
-echo "Admin username? (default: admin)"
-read -r ADMIN_USER
+# Very basic email check
+if [[ ! "\( ADMIN_EMAIL" =\~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,} \) ]]; then
+    echo -e "\( {RED}Please enter a valid email address \){NC}"
+    exit 1
+fi
+
+read -rp "Admin username [admin]: " ADMIN_USER
 ADMIN_USER="${ADMIN_USER:-admin}"
 
-echo "Admin password? (min 8 chars)"
-read -s ADMIN_PASS
+read -rsp "Admin password (min 8 chars): " ADMIN_PASS
+echo ""
+read -rsp "Confirm admin password: " ADMIN_PASS2
 echo ""
 
+if [[ ${#ADMIN_PASS} -lt 8 ]]; then
+    echo -e "\( {RED}Password must be at least 8 characters \){NC}"
+    exit 1
+fi
+if [[ "$ADMIN_PASS" != "$ADMIN_PASS2" ]]; then
+    echo -e "\( {RED}Passwords do not match \){NC}"
+    exit 1
+fi
+
+# Database passwords
+read -rsp "MySQL root password (strong!): " MYSQL_ROOT_PASS
+echo ""
+read -rsp "MySQL app user password (pterodactyl user): " MYSQL_APP_PASS
+echo ""
+
+if [[ -z "$MYSQL_ROOT_PASS" || -z "$MYSQL_APP_PASS" ]]; then
+    echo -e "\( {RED}Both database passwords are required \){NC}"
+    exit 1
+fi
+
+# Optional Let's Encrypt
+read -rp "Enable Let's Encrypt? (y/n) [n]: " LE_ENABLE
+LE_ENABLE="${LE_ENABLE:-n}"
+LE_EMAIL=""
+if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+    read -rp "Email for Let's Encrypt notifications: " LE_EMAIL
+    if [[ -z "$LE_EMAIL" ]]; then
+        echo -e "\( {YELLOW}No email provided → Let's Encrypt will be disabled \){NC}"
+        LE_ENABLE="n"
+    fi
+fi
+
+echo ""
+echo -e "\( {YELLOW}Summary of settings: \){NC}"
+echo "APP_URL          = $APP_URL"
+echo "Admin email      = $ADMIN_EMAIL"
+echo "Admin username   = $ADMIN_USER"
+echo "Admin password   = [hidden]"
+echo "DB root pass     = [hidden]"
+echo "DB app pass      = [hidden]"
+if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+    echo "Let's Encrypt    = yes ($LE_EMAIL)"
+else
+    echo "Let's Encrypt    = no"
+fi
+echo ""
+read -p "Continue? (y/n): " CONFIRM
+if [[ ! "\( CONFIRM" =\~ ^[Yy] \) ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
 # ────────────────────────────────────────────────
-# Launch empty Ubuntu container
+# Prepare folders & files
 # ────────────────────────────────────────────────
-echo -e "\n\( {YELLOW}Starting empty Ubuntu container (name: ks-ptero-all-in-one)... \){NC}"
-docker rm -f ks-ptero-all-in-one 2>/dev/null || true
 
-docker run -d --name ks-ptero-all-in-one --restart unless-stopped \
-  -p 80:80 \
-  -e TZ=Asia/Kolkata \
-  ubuntu:24.04 sleep infinity
+mkdir -p ./pterodactyl/{var,logs}
 
-sleep 6  # give container time to boot
+# Generate secure app key (40 chars base64-like)
+APP_KEY=$(openssl rand -base64 32 | tr -d '/+' | head -c 32)
 
 # ────────────────────────────────────────────────
-# Full installation inside container
+# Write docker-compose.yml
 # ────────────────────────────────────────────────
-echo -e "\( {YELLOW}Installing Pterodactyl Panel + all services inside container... \){NC}"
 
-docker exec -it ks-ptero-all-in-one bash -c "
-set -euo pipefail
+cat > docker-compose.yml <<EOF
+version: '3.9'
 
-export DEBIAN_FRONTEND=noninteractive
+x-common: &common
+  restart: unless-stopped
 
-apt-get update && apt-get upgrade -y && apt-get install -y \
-  software-properties-common curl apt-transport-https ca-certificates gnupg lsb-release \
-  nginx nginx-extras \
-  php8.3 php8.3-{cli,gd,mysql,mbstring,bcmath,xml,curl,zip,fpm} \
-  mariadb-server redis-server tar unzip git composer
+x-db-environment: &db-environment
+  MYSQL_PASSWORD: "$MYSQL_APP_PASS"
+  MYSQL_ROOT_PASSWORD: "$MYSQL_ROOT_PASS"
 
-# ─────── MariaDB setup ───────
-mysqld_safe --user=mysql --skip-networking --socket=/var/run/mysqld/mysqld.sock &
-sleep 10
+x-panel-environment: &panel-environment
+  APP_URL: "$APP_URL"
+  APP_TIMEZONE: "Asia/Kolkata"
+  APP_SERVICE_AUTHOR: "$ADMIN_EMAIL"
+$(if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+    echo "  LE_EMAIL: \"$LE_EMAIL\""
+fi)
 
-until mysqladmin ping --silent; do
-  echo 'Waiting for MariaDB to be ready...'
-  sleep 2
+x-mail-environment: &mail-environment
+  MAIL_FROM: "$ADMIN_EMAIL"
+  MAIL_DRIVER: "smtp"
+  MAIL_HOST: "mailhog"
+  MAIL_PORT: "1025"
+  MAIL_USERNAME: ""
+  MAIL_PASSWORD: ""
+  MAIL_ENCRYPTION: "null"
+  MAIL_FROM_NAME: "Pterodactyl Panel"
+
+services:
+
+  database:
+    <<: *common
+    image: mariadb:10.11
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      <<: *db-environment
+      MYSQL_DATABASE: panel
+      MYSQL_USER: pterodactyl
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "--protocol=tcp", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pteronet
+
+  cache:
+    <<: *common
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pteronet
+
+  mailhog:
+    <<: *common
+    image: mailhog/mailhog:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    networks:
+      - pteronet
+
+  panel:
+    <<: *common
+    image: ghcr.io/pterodactyl/panel:latest
+    ports:
+      - "8080:80"
+      - "8443:443"
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    volumes:
+      - ./pterodactyl/var:/app/var/
+      - ./pterodactyl/logs:/app/storage/logs
+    environment:
+      <<: [*panel-environment, *mail-environment]
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: "$APP_KEY"
+      APP_ENVIRONMENT_ONLY: "false"
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_DRIVER: redis
+      REDIS_HOST: cache
+      REDIS_PASSWORD: null
+      REDIS_PORT: 6379
+      DB_HOST: database
+      DB_PORT: 3306
+      DB_DATABASE: panel
+      DB_USERNAME: pterodactyl
+      DB_PASSWORD: "$MYSQL_APP_PASS"
+    networks:
+      - pteronet
+
+networks:
+  pteronet:
+    driver: bridge
+
+volumes:
+  db_data:
+EOF
+
+echo -e "\( {GREEN}docker-compose.yml created. \){NC}"
+
+# ────────────────────────────────────────────────
+# Start stack
+# ────────────────────────────────────────────────
+
+echo -e "\( {YELLOW}Starting containers... (may take 1–3 minutes) \){NC}"
+docker compose up -d --remove-orphans
+
+echo -e "\( {YELLOW}Waiting for database & redis to be ready (up to 90 seconds)... \){NC}"
+sleep 20
+
+# Wait longer if needed
+for i in {1..12}; do
+    if docker compose exec -T database mariadb-admin --protocol=tcp ping >/dev/null 2>&1; then
+        break
+    fi
+    echo "Still waiting... ($i/12)"
+    sleep 5
 done
 
-mysql -uroot -e \"CREATE DATABASE panel;\"
-mysql -uroot -e \"CREATE USER 'pterouser'@'localhost' IDENTIFIED BY '${DB_PASS}';\"
-mysql -uroot -e \"GRANT ALL PRIVILEGES ON panel.* TO 'pterouser'@'localhost';\"
-mysql -uroot -e \"FLUSH PRIVILEGES;\"
+# ────────────────────────────────────────────────
+# Run setup inside panel container
+# ────────────────────────────────────────────────
 
-mysqladmin -uroot shutdown
-sleep 3
+echo -e "\( {YELLOW}Running initial setup commands... \){NC}"
 
-# ─────── Panel download & setup ───────
-mkdir -p /var/www/pterodactyl && cd /var/www/pterodactyl
+docker compose exec -u root -T panel chown -R www-data:www-data /app/var /app/storage
 
-curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-tar -xzvf panel.tar.gz
-rm panel.tar.gz
+# Usually not needed in latest images, but safe
+docker compose exec -T panel php artisan storage:link || true
 
-chown -R www-data:www-data /var/www/pterodactyl
-chmod -R 755 storage/* bootstrap/cache
+# The panel image usually auto-runs migrations on first start,
+# but we force full setup anyway
 
-cp .env.example .env
-
-sed -i \"s|^APP_URL=.*|APP_URL=${APP_URL}|g\" .env
-sed -i \"s|^APP_ENV=.*|APP_ENV=production|g\" .env
-sed -i \"s|^APP_DEBUG=.*|APP_DEBUG=false|g\" .env
-sed -i \"s|^DB_HOST=.*|DB_HOST=127.0.0.1|g\" .env
-sed -i \"s|^DB_DATABASE=.*|DB_DATABASE=panel|g\" .env
-sed -i \"s|^DB_USERNAME=.*|DB_USERNAME=pterouser|g\" .env
-sed -i \"s|^DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|g\" .env
-sed -i \"s|^CACHE_DRIVER=.*|CACHE_DRIVER=redis|g\" .env
-sed -i \"s|^SESSION_DRIVER=.*|SESSION_DRIVER=redis|g\" .env
-sed -i \"s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=redis|g\" .env
-sed -i \"s|^REDIS_HOST=.*|REDIS_HOST=127.0.0.1|g\" .env
-
-COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
-
-php artisan key:generate --force
-php artisan migrate --seed --force
-php artisan storage:link
+docker compose exec -T panel php artisan migrate --seed --force
+docker compose exec -T panel php artisan key:generate --force || true   # already set, but safe
 
 # Create admin user non-interactively
-(echo '\( {ADMIN_PASS}'; echo ' \){ADMIN_PASS}') | php artisan p:user:make --email '\( {ADMIN_EMAIL}' --username ' \){ADMIN_USER}'
-
-# ─────── Nginx config ───────
-cat > /etc/nginx/sites-available/default <<'NGINX_EOF'
-server {
-    listen 80 default_server;
-    server_name _;
-    root /var/www/pterodactyl/public;
-    index index.php;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
+docker compose exec -T panel php artisan p:user:make \
+    --email="$ADMIN_EMAIL" \
+    --username="$ADMIN_USER" \
+    --password="$ADMIN_PASS" \
+    --admin=true \
+    --no-interaction || {
+        echo -e "\( {RED}Failed to create admin user. Try manually: \){NC}"
+        echo "docker compose exec -it panel php artisan p:user:make"
     }
 
-    location \~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-    }
-
-    location \~ /\.ht {
-        deny all;
-    }
-}
-NGINX_EOF
-
-# Start services
-service php8.3-fpm start
-service redis-server start
-service nginx start
-
-# Background tasks (queue + cron simulation)
-php /var/www/pterodactyl/artisan queue:work --sleep=3 --tries=3 --daemon &
-(while true; do php /var/www/pterodactyl/artisan schedule:run --verbose --no-interaction; sleep 60; done) &
-"
-
-echo -e "\n\( {GREEN}KS Warrior installation complete! \){NC}"
-echo -e "Panel URL:          \( {YELLOW} \){APP_URL}${NC}"
-echo -e "Admin Email:        \( {YELLOW} \){ADMIN_EMAIL}${NC}"
-echo -e "Admin Username:     \( {YELLOW} \){ADMIN_USER}${NC}"
-echo -e "Admin Password:     \( {YELLOW} \){ADMIN_PASS}${NC}   (change immediately!)"
 echo ""
-echo "Container name: ks-ptero-all-in-one"
+echo -e "\( {GREEN}╔════════════════════════════════════════════════════════════╗ \){NC}"
+echo -e "\( {GREEN}║                  Setup finished!                           ║ \){NC}"
+echo -e "\( {GREEN}╚════════════════════════════════════════════════════════════╝ \){NC}"
 echo ""
-echo "Useful commands:"
-echo "  docker exec -it ks-ptero-all-in-one bash     → access shell"
-echo "  docker logs ks-ptero-all-in-one              → view logs"
-echo "  docker restart ks-ptero-all-in-one           → restart"
-echo "  docker stop ks-ptero-all-in-one              → stop"
+echo "Panel should be available at:   $APP_URL"
+echo "If using HTTP → http://your-server-ip:8080"
+echo "Mailhog (test emails) →         http://your-server-ip:8025"
 echo ""
-echo "Enjoy your powerful Pterodactyl setup by KS Warrior! 🚀"
+echo -e "\( {YELLOW}Next steps: \){NC}"
+echo "1. Log in → $APP_URL"
+echo "2. Create node + allocation"
+echo "3. Install Wings on same/different machine"
+echo "4. (recommended) Put real reverse proxy (nginx/traefik/caddy) + SSL"
+echo ""
+echo -e "\( {GREEN}Enjoy Pterodactyl! \){NC}"
+echo ""
