@@ -19,8 +19,8 @@ read -rp "Domain / Panel URL (example: https://panel.mydomain.com): " APP_URL
 APP_URL="${APP_URL:-https://panel.example.com}"
 
 # Basic URL validation
-if [[ ! "$APP_URL" =\~ ^https?:// ]]; then
-    echo -e "${RED}URL must start with http:// or https:// ${NC}"
+if [[ ! $APP_URL =\~ ^https?:// ]]; then
+    echo -e "\( {RED}URL must start with http:// or https:// \){NC}"
     exit 1
 fi
 
@@ -28,7 +28,7 @@ read -rp "Admin email (will be used for MAIL_FROM too) [admin@yourdomain.com]: "
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@yourdomain.com}"
 
 # Very basic email check
-if [[ ! "\( ADMIN_EMAIL" =\~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,} \) ]]; then
+if [[ ! \( ADMIN_EMAIL =\~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,} \) ]]; then
     echo -e "\( {RED}Please enter a valid email address \){NC}"
     exit 1
 fi
@@ -65,7 +65,7 @@ fi
 read -rp "Enable Let's Encrypt? (y/n) [n]: " LE_ENABLE
 LE_ENABLE="${LE_ENABLE:-n}"
 LE_EMAIL=""
-if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+if [[ \( LE_ENABLE =\~ ^[Yy] \) ]]; then
     read -rp "Email for Let's Encrypt notifications: " LE_EMAIL
     if [[ -z "$LE_EMAIL" ]]; then
         echo -e "\( {YELLOW}No email provided → Let's Encrypt will be disabled \){NC}"
@@ -81,14 +81,14 @@ echo "Admin username   = $ADMIN_USER"
 echo "Admin password   = [hidden]"
 echo "DB root pass     = [hidden]"
 echo "DB app pass      = [hidden]"
-if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+if [[ \( LE_ENABLE =\~ ^[Yy] \) ]]; then
     echo "Let's Encrypt    = yes ($LE_EMAIL)"
 else
     echo "Let's Encrypt    = no"
 fi
 echo ""
 read -p "Continue? (y/n): " CONFIRM
-if [[ ! "\( CONFIRM" =\~ ^[Yy] \) ]]; then
+if [[ ! \( CONFIRM =\~ ^[Yy] \) ]]; then
     echo "Aborted."
     exit 0
 fi
@@ -99,8 +99,8 @@ fi
 
 mkdir -p ./pterodactyl/{var,logs}
 
-# Generate secure app key (40 chars base64-like)
-APP_KEY=$(openssl rand -base64 32 | tr -d '/+' | head -c 32)
+# Generate secure app key (Laravel 32-char base64)
+APP_KEY="base64:$(openssl rand -base64 32)"
 
 # ────────────────────────────────────────────────
 # Write docker-compose.yml
@@ -120,7 +120,7 @@ x-panel-environment: &panel-environment
   APP_URL: "$APP_URL"
   APP_TIMEZONE: "Asia/Kolkata"
   APP_SERVICE_AUTHOR: "$ADMIN_EMAIL"
-$(if [[ "\( LE_ENABLE" =\~ ^[Yy] \) ]]; then
+$(if [[ \$LE_ENABLE =\~ ^[Yy]\$ ]]; then
     echo "  LE_EMAIL: \"$LE_EMAIL\""
 fi)
 
@@ -228,7 +228,6 @@ docker compose up -d --remove-orphans
 echo -e "\( {YELLOW}Waiting for database & redis to be ready (up to 90 seconds)... \){NC}"
 sleep 20
 
-# Wait longer if needed
 for i in {1..12}; do
     if docker compose exec -T database mariadb-admin --protocol=tcp ping >/dev/null 2>&1; then
         break
@@ -243,18 +242,18 @@ done
 
 echo -e "\( {YELLOW}Running initial setup commands... \){NC}"
 
-docker compose exec -u root -T panel chown -R www-data:www-data /app/var /app/storage
+# Fix permissions (panel runs as www-data)
+docker compose exec -u root -T panel chown -R www-data:www-data /app/var /app/storage/logs
 
-# Usually not needed in latest images, but safe
 docker compose exec -T panel php artisan storage:link || true
 
-# The panel image usually auto-runs migrations on first start,
-# but we force full setup anyway
-
+# Force migrations & seed (harmless even if already done)
 docker compose exec -T panel php artisan migrate --seed --force
-docker compose exec -T panel php artisan key:generate --force || true   # already set, but safe
 
-# Create admin user non-interactively
+# Key is already set in compose, but force just in case
+docker compose exec -T panel php artisan key:generate --force || true
+
+# Create admin user non-interactively (confirmed working in 2026)
 docker compose exec -T panel php artisan p:user:make \
     --email="$ADMIN_EMAIL" \
     --username="$ADMIN_USER" \
@@ -275,10 +274,11 @@ echo "If using HTTP → http://your-server-ip:8080"
 echo "Mailhog (test emails) →         http://your-server-ip:8025"
 echo ""
 echo -e "\( {YELLOW}Next steps: \){NC}"
-echo "1. Log in → $APP_URL"
-echo "2. Create node + allocation"
-echo "3. Install Wings on same/different machine"
-echo "4. (recommended) Put real reverse proxy (nginx/traefik/caddy) + SSL"
+echo "1. Open $APP_URL (or http://YOUR_SERVER_IP:8080) in browser"
+echo "2. Log in with your admin credentials"
+echo "3. Create your first Node + Allocation"
+echo "4. Install Wings (on same or separate machine)"
+echo "5. (Strongly recommended) Put real reverse proxy (Nginx/Traefik/Caddy) + real SSL"
 echo ""
 echo -e "\( {GREEN}Enjoy Pterodactyl! \){NC}"
 echo ""
